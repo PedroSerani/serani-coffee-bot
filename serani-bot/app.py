@@ -288,6 +288,82 @@ def webhook():
     return str(resp)
 
 
+@app.route("/manychat", methods=["POST"])
+def manychat_webhook():
+    """Endpoint for Manychat External Request integration."""
+    data = request.get_json(silent=True) or {}
+    incoming_msg = str(data.get("message", "")).strip()
+    sender = str(data.get("phone", "")).strip()
+    name = str(data.get("name", "")).strip()
+    if not incoming_msg or not sender:
+        return {"version": "v2", "content": {"messages": [{"type": "text", "text": "Hola, ¿en qué puedo ayudarte?"}]}}, 200
+    if sender not in conversation_history:
+        conversation_history[sender] = []
+    # Prepend name context on first message
+    user_content = incoming_msg
+    if len(conversation_history[sender]) == 0 and name:
+        user_content = incoming_msg
+    conversation_history[sender].append({"role": "user", "content": user_content})
+    if len(conversation_history[sender]) > 20:
+        conversation_history[sender] = conversation_history[sender][-20:]
+    availability = get_weekly_availability()
+    today_str = datetime.datetime.now().strftime("%A, %B %d, %Y")
+    date_note = f"TODAY'S DATE: {today_str}. Always use this year when creating bookings."
+    if name and len(conversation_history[sender]) <= 2:
+        date_note += f" The customer's name is {name}."
+    if availability:
+        dynamic_prompt = (SYSTEM_PROMPT + f"\n\n{date_note}\n\n{availability}\n\n"
+            + "IMPORTANT: When discussing scheduling, ONLY suggest time slots listed as available above. "
+            + "If the customer requests a time that is not available, apologize warmly and offer the nearest open alternatives.")
+    else:
+        dynamic_prompt = SYSTEM_PROMPT + f"\n\n{date_note}"
+    try:
+        response = anthropic_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            system=dynamic_prompt,
+            messages=conversation_history[sender],
+            tools=BOOKING_TOOLS
+        )
+        reply = ""
+        tool_use_block = None
+        for block in response.content:
+            if hasattr(block, "type") and block.type == "tool_use" and block.name == "create_booking":
+                tool_use_block = block
+                break
+        if tool_use_block:
+            booking_result = create_calendar_event(
+                customer_name=tool_use_block.input.get("customer_name", name or "Cliente"),
+                customer_phone=sender,
+                date=tool_use_block.input.get("date", ""),
+                time_str=tool_use_block.input.get("time", ""),
+                address=tool_use_block.input.get("address", ""),
+                notes=tool_use_block.input.get("notes", "")
+            )
+            tool_messages = list(conversation_history[sender]) + [
+                {"role": "assistant", "content": response.content},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_block.id, "content": booking_result}]}
+            ]
+            follow_up = anthropic_client.messages.create(
+                model="claude-sonnet-4-6", max_tokens=1024,
+                system=dynamic_prompt, messages=tool_messages
+            )
+            reply = follow_up.content[0].text
+            conversation_history[sender].append({"role": "assistant", "content": response.content})
+            conversation_history[sender].append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_block.id, "content": booking_result}]})
+            conversation_history[sender].append({"role": "assistant", "content": reply})
+        else:
+            for block in response.content:
+                if hasattr(block, "type") and block.type == "text":
+                    reply += block.text
+            conversation_history[sender].append({"role": "assistant", "content": reply})
+    except Exception as e:
+        reply = "Hola, tuve un pequeño problema técnico. ¿Puedes repetir tu mensaje?"
+        print(f"Manychat Claude error: {e}")
+    # Return in Manychat's Dynamic Block format
+    return {"version": "v2", "content": {"messages": [{"type": "text", "text": reply}]}}, 200
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return "Serani Specialty Coffee Bot - Sofia is online!", 200
