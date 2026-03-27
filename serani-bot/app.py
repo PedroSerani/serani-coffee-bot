@@ -6,16 +6,51 @@ import json
 import datetime
 
 app = Flask(__name__)
-
-# Initialize Anthropic client
 anthropic_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-
-# Store conversation history per user (in memory)
 conversation_history = {}
 
 # Calendar availability cache - refreshes every 30 minutes
 _calendar_cache = {"data": None, "updated_at": None}
 CACHE_MINUTES = 30
+
+# Tool definition so Sofia can create bookings
+BOOKING_TOOLS = [
+    {
+        "name": "create_booking",
+        "description": (
+            "Create a confirmed coffee class booking in Google Calendar. "
+            "Call this ONLY when the customer has confirmed ALL of: their name, "
+            "the desired date and time, and their address/location for the class. "
+            "Do NOT call this until the customer has explicitly said yes or confirmed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "customer_name": {
+                    "type": "string",
+                    "description": "Customer full name"
+                },
+                "date": {
+                    "type": "string",
+                    "description": "Booking date in YYYY-MM-DD format"
+                },
+                "time": {
+                    "type": "string",
+                    "description": "Start time in HH:MM 24-hour format (e.g. 14:00 for 2pm)"
+                },
+                "address": {
+                    "type": "string",
+                    "description": "Location/address where the class will take place"
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Additional info: milk preference, group size, equipment, etc."
+                }
+            },
+            "required": ["customer_name", "date", "time", "address"]
+        }
+    }
+]
 
 
 def get_calendar_service():
@@ -23,15 +58,13 @@ def get_calendar_service():
     try:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
-
         creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
         if not creds_json:
             return None
-
         creds_info = json.loads(creds_json)
         creds = service_account.Credentials.from_service_account_info(
             creds_info,
-            scopes=["https://www.googleapis.com/auth/calendar.readonly"]
+            scopes=["https://www.googleapis.com/auth/calendar"]
         )
         return build("calendar", "v3", credentials=creds)
     except Exception as e:
@@ -40,63 +73,35 @@ def get_calendar_service():
 
 
 def get_weekly_availability():
-    """
-    Return a human-readable string of Pedro's available time slots
-    for the next 7 days. Results are cached for CACHE_MINUTES.
-    Returns None if Google credentials are not configured.
-    """
+    """Returns human-readable available slots for next 7 days. Cached 30 min."""
     global _calendar_cache
-
     now_utc = datetime.datetime.utcnow()
-
-    # Return cached result if still fresh
     if _calendar_cache["data"] and _calendar_cache["updated_at"]:
         age_minutes = (now_utc - _calendar_cache["updated_at"]).total_seconds() / 60
         if age_minutes < CACHE_MINUTES:
             return _calendar_cache["data"]
-
     service = get_calendar_service()
     if not service:
-        return None  # Calendar not configured - bot works without it
-
+        return None
     try:
         calendar_id = os.environ.get("GOOGLE_CALENDAR_ID", "primary")
-
-        # Houston = UTC-5 (CDT) or UTC-6 (CST). Configurable via env var.
         utc_offset = int(os.environ.get("HOUSTON_UTC_OFFSET", "-5"))
-
         lines = ["PEDRO'S AVAILABILITY (Houston time, next 7 days):"]
-
         for day_offset in range(7):
             target_date = now_utc.date() + datetime.timedelta(days=day_offset)
-
-            # Window: 10am to 10pm Houston time expressed in UTC
-            window_start = datetime.datetime(
-                target_date.year, target_date.month, target_date.day,
-                10 - utc_offset, 0, 0
-            )
-            window_end = datetime.datetime(
-                target_date.year, target_date.month, target_date.day,
-                22 - utc_offset, 0, 0
-            )
-
+            window_start = datetime.datetime(target_date.year, target_date.month, target_date.day, 10 - utc_offset, 0, 0)
+            window_end = datetime.datetime(target_date.year, target_date.month, target_date.day, 22 - utc_offset, 0, 0)
             body = {
                 "timeMin": window_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "timeMax": window_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "items": [{"id": calendar_id}]
             }
-
             result = service.freebusy().query(body=body).execute()
             busy_periods = result["calendars"][calendar_id]["busy"]
-
             available_slots = []
-            for hour in range(10, 19):  # 10am to 6pm last start
-                slot_start_utc = datetime.datetime(
-                    target_date.year, target_date.month, target_date.day,
-                    hour - utc_offset, 0, 0
-                )
+            for hour in range(10, 19):
+                slot_start_utc = datetime.datetime(target_date.year, target_date.month, target_date.day, hour - utc_offset, 0, 0)
                 slot_end_utc = slot_start_utc + datetime.timedelta(hours=4)
-
                 is_free = True
                 for busy in busy_periods:
                     b_start = datetime.datetime.strptime(busy["start"], "%Y-%m-%dT%H:%M:%SZ")
@@ -104,155 +109,160 @@ def get_weekly_availability():
                     if not (slot_end_utc <= b_start or slot_start_utc >= b_end):
                         is_free = False
                         break
-
                 if is_free:
                     display_hour = hour if hour <= 12 else hour - 12
                     am_pm = "AM" if hour < 12 else "PM"
                     available_slots.append(f"{display_hour}:00 {am_pm}")
-
             day_label = (now_utc.date() + datetime.timedelta(days=day_offset)).strftime("%A %b %d")
             if available_slots:
                 lines.append(f"- {day_label}: {', '.join(available_slots)}")
             else:
                 lines.append(f"- {day_label}: fully booked")
-
         availability_text = "\n".join(lines)
         _calendar_cache["data"] = availability_text
         _calendar_cache["updated_at"] = now_utc
         return availability_text
-
     except Exception as e:
         print(f"Calendar query error: {e}")
         return None
 
 
-SYSTEM_PROMPT = """You are Sofia, the passionate coffee specialist and enrollment guide for Serani Specialty Coffee. Your job is to help people discover the art of home coffee brewing and guide them toward enrolling in the Home Barista Course.
+def create_calendar_event(customer_name, customer_phone, date, time_str, address, notes=""):
+    """Creates a 4-hour coffee class event in Pedro's Google Calendar."""
+    service = get_calendar_service()
+    if not service:
+        return "Calendar not configured - booking noted but not added to calendar."
+    try:
+        calendar_id = os.environ.get("GOOGLE_CALENDAR_ID", "primary")
+        utc_offset = int(os.environ.get("HOUSTON_UTC_OFFSET", "-5"))
+        year, month, day = map(int, date.split("-"))
+        hour, minute = map(int, time_str.split(":"))
+        # Convert Houston local time to UTC
+        start_utc = datetime.datetime(year, month, day, hour, minute) - datetime.timedelta(hours=utc_offset)
+        end_utc = start_utc + datetime.timedelta(hours=4)
+        description_parts = [
+            f"Customer: {customer_name}",
+            f"WhatsApp: {customer_phone}",
+            f"Location: {address}",
+        ]
+        if notes:
+            description_parts.append(f"Notes: {notes}")
+        event = {
+            "summary": f"Coffee Class - {customer_name}",
+            "location": address,
+            "description": "\n".join(description_parts),
+            "start": {"dateTime": start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), "timeZone": "UTC"},
+            "end": {"dateTime": end_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), "timeZone": "UTC"}
+        }
+        result = service.events().insert(calendarId=calendar_id, body=event).execute()
+        # Invalidate availability cache so next check reflects the new booking
+        _calendar_cache["data"] = None
+        _calendar_cache["updated_at"] = None
+        print(f"Calendar event created: {result.get('id')}")
+        return f"Booking successfully added to Pedro's calendar. Event ID: {result.get('id', 'ok')}"
+    except Exception as e:
+        print(f"Calendar event creation error: {e}")
+        return f"Booking noted but calendar error occurred: {str(e)}"
 
-YOUR PERSONALITY:
-- Deeply passionate about coffee - you live and breathe the craft
-- Educational: you share knowledge naturally, like a mentor who can't help but teach
-- Seductive: you paint vivid sensory pictures - the aroma, the crema, the perfect shot, the ritual
-- Sales-minded: you guide conversations with warmth toward enrollment, creating desire and urgency
 
-ABOUT SERANI SPECIALTY COFFEE:
-- Founded by Pedro Serani (our founder and head instructor), a specialty coffee expert and educator
-- Website: seranispecialtycoffee.com
-- Mission: Bringing the art of specialty coffee into people's homes
-- Based in Houston, TX area
+SYSTEM_PROMPT = """You are Sofia, the passionate coffee specialist and enrollment guide for Serani Specialty Coffee. You answer via WhatsApp on behalf of Pedro Serani. Your personality is warm, knowledgeable, and enthusiastic about specialty coffee.
 
-THE HOME BARISTA COURSE:
-- A comprehensive 4-hour in-person course teaching everything needed to brew exceptional coffee at home
-- Topics: espresso extraction, milk texturing, bean selection, grinder calibration, water ratios and temperature, sensory tasting skills
-- Perfect for ALL levels - absolute beginners are very welcome and will thrive
-- Students leave capable of making cafe-quality coffee every single morning at home
-- Small, intimate group classes (maximum 6 students) with personal attention from Pedro Serani
-- Everything is provided - students don't need to bring anything
-- Available 7 days a week - first class starts at 10am, last class starts at 6pm (the 4-hour course ends at 10pm)
+CRITICAL WhatsApp formatting rule: use single asterisks for bold like *this*, NEVER double asterisks like **this**.
+CRITICAL: Never use the em dash character (--). Use a regular hyphen (-) or rewrite the sentence.
 
-PRICING:
-- 1 student: $150
-- 2 students: $250 (great deal for couples or friends!)
-- 3 or more students: $100 per student (up to 6 max)
+ABOUT THE BUSINESS:
+Serani Specialty Coffee offers private in-home specialty coffee experiences led by Pedro. The 4-hour class covers brewing techniques, bean origins, tasting, and more. Classes are conducted at the customer's home in Houston.
 
-LOCATION:
-- We come to YOUR home anywhere in the Houston area (most popular option!)
-- We also have a location at our leasing office: 23403 Kingsland Blvd, Katy, TX 77494
-  (Note: Pedro Serani's home studio is currently under renovations, so the Katy location is the alternative)
+ABOUT PEDRO:
+The FIRST time you mention Pedro Serani in a conversation, briefly introduce him as our founder and head instructor with a passion for bringing world-class coffee education directly to people's homes. After the first mention, just use his name naturally without re-introducing him.
 
-SCHEDULING & BOOKING:
-- Date and time are agreed upon right here in the chat - very flexible!
-- To reserve a spot, a $50 deposit is required (applied toward the full course price)
-- Deposit is paid via Zelle: the number to search and send to is 832-334-3416. The name on the account is Pedro Serani, which is just so they can confirm they found the right one
-- Zelle payers get a discount on the remaining balance
-- Full payment can also be done online, but Zelle is preferred and gets a better rate
+PRICING AND PAYMENT:
+- Price: $250 for the full 4-hour private class
+- Payment via Zelle: send to *832-334-3416* (the name on the account is Pedro Serani - that's just so they can confirm they found the right account, but the phone number is what matters)
 
-BOOKING FLOW - follow this order naturally:
-1. Build excitement and answer questions about the course
-2. Once they are interested, find out how many students will attend
-3. ALWAYS ask about any food intolerances or allergies AND milk preference (whole milk, oat, almond, soy, etc.) - do this before confirming
-4. Agree on a preferred date and time - ONLY suggest slots that appear in the AVAILABILITY section below (if provided). If no availability data is shown, ask their preference and say Pedro will confirm
-5. Confirm the location - ask them to share their address. They can send a location pin, type their address, or both
-6. At the end, when everything is set, share the deposit details: send $50 via Zelle to 832-334-3416. The name Pedro Serani on the account is just to confirm they found the right one
-7. Once the deposit is confirmed, send this reminder: "One last thing - please avoid drinking coffee on the day of the class! We are going to be tasting and drinking A LOT of coffee together, so come with a fresh palate. See you soon!"
+BOOKING FLOW - follow these steps in order:
+1. Warmly engage and answer any questions about the class
+2. Ask for the customer's name
+3. Ask for their preferred date and time
+4. Check availability - ONLY suggest slots from the AVAILABILITY section below (if provided). Last available booking is 6:00 PM (class ends at 10 PM). If requested time is unavailable, apologize warmly and offer nearest open alternatives.
+5. Ask for their address or location pin (accept either a typed address, a WhatsApp location pin, or both)
+6. Ask about milk preferences (whole, oat, almond, etc.) and group size
+7. Share pricing ($250) and Zelle payment details
+8. Once the customer confirms everything (name, date, time, address) and is ready to book - use the create_booking tool to lock in their spot on Pedro's calendar, then send them a warm confirmation message
 
-YOUR CONVERSATION APPROACH:
-1. Greet warmly and personally
-2. Ask what brought them here and about their current coffee experience
-3. Educate naturally - drop fascinating insights that spark curiosity
-4. Paint the experience vividly: "Imagine waking up and pulling a flawless espresso shot in your own kitchen, the crema blooming on top..."
-5. Build desire and urgency naturally - without being pushy
-6. Handle objections with empathy and wisdom
-7. Always guide toward the next step: learning more, reserving a spot, or enrolling
-
-STRICT RULES:
-- Keep responses SHORT and punchy for WhatsApp (2-3 paragraphs max)
-- Use occasional coffee emojis to feel warm and human
-- ALWAYS end your message with a question or a clear call to action
-- Respond in whatever language the customer uses (Spanish or English - switch fluidly)
-- Never mention you are an AI unless directly asked. If asked, say you are Sofia, the Serani Specialty Coffee team assistant.
-- Be concise. WhatsApp conversations should feel effortless, not like reading an essay.
-- Never share the Zelle number until the very end when the customer is ready to pay the deposit.
-- CRITICAL WhatsApp formatting rule: use single asterisks for bold like *this*, NEVER double asterisks. Using **double asterisks** will show the ** symbols visibly to the customer and look broken.
-- CRITICAL: Never use the em dash character (the long dash). Use a regular hyphen (-) or rewrite the sentence instead.
-- The FIRST time you mention Pedro Serani in a conversation, briefly introduce him as our founder and head instructor. After that, just use his name naturally."""
-
+IMPORTANT BOOKING RULE: Only use the create_booking tool after the customer has explicitly confirmed their date, time, and address. After you call create_booking, send a warm confirmation message to the customer with all the booking details."""
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     incoming_msg = request.form.get("Body", "").strip()
     sender = request.form.get("From", "")
-
     if not incoming_msg:
         return str(MessagingResponse())
-
-    # Get or create conversation history for this user
     if sender not in conversation_history:
         conversation_history[sender] = []
-
-    # Add user message to history
-    conversation_history[sender].append({
-        "role": "user",
-        "content": incoming_msg
-    })
-
-    # Keep only last 20 messages to avoid token overflow
+    conversation_history[sender].append({"role": "user", "content": incoming_msg})
     if len(conversation_history[sender]) > 20:
         conversation_history[sender] = conversation_history[sender][-20:]
-
-    # Build dynamic system prompt - inject live calendar availability if configured
+    # Inject live calendar availability into system prompt
     availability = get_weekly_availability()
     if availability:
-        dynamic_prompt = (
-            SYSTEM_PROMPT
-            + f"\n\n{availability}\n\n"
+        dynamic_prompt = (SYSTEM_PROMPT + f"\n\n{availability}\n\n"
             + "IMPORTANT: When discussing scheduling, ONLY suggest time slots listed as available above. "
-            + "If the customer requests a time that is not available, apologize warmly and offer the nearest open alternatives."
-        )
+            + "If the customer requests a time that is not available, apologize warmly and offer the nearest open alternatives.")
     else:
         dynamic_prompt = SYSTEM_PROMPT
-
     try:
-        # Call Claude API
         response = anthropic_client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1024,
             system=dynamic_prompt,
-            messages=conversation_history[sender]
+            messages=conversation_history[sender],
+            tools=BOOKING_TOOLS
         )
-
-        reply = response.content[0].text
-
-        # Add assistant response to history
-        conversation_history[sender].append({
-            "role": "assistant",
-            "content": reply
-        })
-
+        reply = ""
+        tool_use_block = None
+        for block in response.content:
+            if hasattr(block, "type") and block.type == "tool_use" and block.name == "create_booking":
+                tool_use_block = block
+                break
+        if tool_use_block:
+            # Execute the calendar booking
+            booking_result = create_calendar_event(
+                customer_name=tool_use_block.input.get("customer_name", "Customer"),
+                customer_phone=sender,
+                date=tool_use_block.input.get("date", ""),
+                time_str=tool_use_block.input.get("time", ""),
+                address=tool_use_block.input.get("address", ""),
+                notes=tool_use_block.input.get("notes", "")
+            )
+            # Feed tool result back to get Sofia's confirmation message
+            tool_messages = list(conversation_history[sender]) + [
+                {"role": "assistant", "content": response.content},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": tool_use_block.id, "content": booking_result}
+                ]}
+            ]
+            follow_up = anthropic_client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                system=dynamic_prompt,
+                messages=tool_messages
+            )
+            reply = follow_up.content[0].text
+            # Store full tool exchange in history
+            conversation_history[sender].append({"role": "assistant", "content": response.content})
+            conversation_history[sender].append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tool_use_block.id, "content": booking_result}
+            ]})
+            conversation_history[sender].append({"role": "assistant", "content": reply})
+        else:
+            for block in response.content:
+                if hasattr(block, "type") and block.type == "text":
+                    reply += block.text
+            conversation_history[sender].append({"role": "assistant", "content": reply})
     except Exception as e:
         reply = "Hey! Something went sideways on my end. Could you send that again?"
         print(f"Error calling Claude API: {e}")
-
-    # Send response via Twilio
     resp = MessagingResponse()
     resp.message(reply)
     return str(resp)
