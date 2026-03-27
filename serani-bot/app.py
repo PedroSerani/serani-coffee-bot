@@ -2,6 +2,8 @@ from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 import anthropic
 import os
+import json
+import datetime
 
 app = Flask(__name__)
 
@@ -10,6 +12,119 @@ anthropic_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY
 
 # Store conversation history per user (in memory)
 conversation_history = {}
+
+# Calendar availability cache - refreshes every 30 minutes
+_calendar_cache = {"data": None, "updated_at": None}
+CACHE_MINUTES = 30
+
+
+def get_calendar_service():
+    """Build a Google Calendar service client using service account credentials."""
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+
+        creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+        if not creds_json:
+            return None
+
+        creds_info = json.loads(creds_json)
+        creds = service_account.Credentials.from_service_account_info(
+            creds_info,
+            scopes=["https://www.googleapis.com/auth/calendar.readonly"]
+        )
+        return build("calendar", "v3", credentials=creds)
+    except Exception as e:
+        print(f"Calendar service init error: {e}")
+        return None
+
+
+def get_weekly_availability():
+    """
+    Return a human-readable string of Pedro's available time slots
+    for the next 7 days. Results are cached for CACHE_MINUTES.
+    Returns None if Google credentials are not configured.
+    """
+    global _calendar_cache
+
+    now_utc = datetime.datetime.utcnow()
+
+    # Return cached result if still fresh
+    if _calendar_cache["data"] and _calendar_cache["updated_at"]:
+        age_minutes = (now_utc - _calendar_cache["updated_at"]).total_seconds() / 60
+        if age_minutes < CACHE_MINUTES:
+            return _calendar_cache["data"]
+
+    service = get_calendar_service()
+    if not service:
+        return None  # Calendar not configured - bot works without it
+
+    try:
+        calendar_id = os.environ.get("GOOGLE_CALENDAR_ID", "primary")
+
+        # Houston = UTC-5 (CDT) or UTC-6 (CST). Configurable via env var.
+        utc_offset = int(os.environ.get("HOUSTON_UTC_OFFSET", "-5"))
+
+        lines = ["PEDRO'S AVAILABILITY (Houston time, next 7 days):"]
+
+        for day_offset in range(7):
+            target_date = now_utc.date() + datetime.timedelta(days=day_offset)
+
+            # Window: 10am to 10pm Houston time expressed in UTC
+            window_start = datetime.datetime(
+                target_date.year, target_date.month, target_date.day,
+                10 - utc_offset, 0, 0
+            )
+            window_end = datetime.datetime(
+                target_date.year, target_date.month, target_date.day,
+                22 - utc_offset, 0, 0
+            )
+
+            body = {
+                "timeMin": window_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "timeMax": window_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "items": [{"id": calendar_id}]
+            }
+
+            result = service.freebusy().query(body=body).execute()
+            busy_periods = result["calendars"][calendar_id]["busy"]
+
+            available_slots = []
+            for hour in range(10, 19):  # 10am to 6pm last start
+                slot_start_utc = datetime.datetime(
+                    target_date.year, target_date.month, target_date.day,
+                    hour - utc_offset, 0, 0
+                )
+                slot_end_utc = slot_start_utc + datetime.timedelta(hours=4)
+
+                is_free = True
+                for busy in busy_periods:
+                    b_start = datetime.datetime.strptime(busy["start"], "%Y-%m-%dT%H:%M:%SZ")
+                    b_end = datetime.datetime.strptime(busy["end"], "%Y-%m-%dT%H:%M:%SZ")
+                    if not (slot_end_utc <= b_start or slot_start_utc >= b_end):
+                        is_free = False
+                        break
+
+                if is_free:
+                    display_hour = hour if hour <= 12 else hour - 12
+                    am_pm = "AM" if hour < 12 else "PM"
+                    available_slots.append(f"{display_hour}:00 {am_pm}")
+
+            day_label = (now_utc.date() + datetime.timedelta(days=day_offset)).strftime("%A %b %d")
+            if available_slots:
+                lines.append(f"- {day_label}: {', '.join(available_slots)}")
+            else:
+                lines.append(f"- {day_label}: fully booked")
+
+        availability_text = "\n".join(lines)
+        _calendar_cache["data"] = availability_text
+        _calendar_cache["updated_at"] = now_utc
+        return availability_text
+
+    except Exception as e:
+        print(f"Calendar query error: {e}")
+        return None
+
 
 SYSTEM_PROMPT = """You are Sofia, the passionate coffee specialist and enrollment guide for Serani Specialty Coffee. Your job is to help people discover the art of home coffee brewing and guide them toward enrolling in the Home Barista Course.
 
@@ -30,7 +145,7 @@ THE HOME BARISTA COURSE:
 - Topics: espresso extraction, milk texturing, bean selection, grinder calibration, water ratios and temperature, sensory tasting skills
 - Perfect for ALL levels - absolute beginners are very welcome and will thrive
 - Students leave capable of making cafe-quality coffee every single morning at home
-- Small, intimate group classes (maximum 6 students) with personal attention from Pedro Serani, our founder and head instructor
+- Small, intimate group classes (maximum 6 students) with personal attention from Pedro Serani
 - Everything is provided - students don't need to bring anything
 - Available 7 days a week - first class starts at 10am, last class starts at 6pm (the 4-hour course ends at 10pm)
 
@@ -42,12 +157,12 @@ PRICING:
 LOCATION:
 - We come to YOUR home anywhere in the Houston area (most popular option!)
 - We also have a location at our leasing office: 23403 Kingsland Blvd, Katy, TX 77494
-  (Note: Pedro Serani's home studio is currently under renovations, so the Katy location is the alternative to coming to the student's home)
+  (Note: Pedro Serani's home studio is currently under renovations, so the Katy location is the alternative)
 
 SCHEDULING & BOOKING:
 - Date and time are agreed upon right here in the chat - very flexible!
 - To reserve a spot, a $50 deposit is required (applied toward the full course price)
-- Deposit is paid via Zelle: the phone number is 832-334-3416 - that is what they need to search and send to. The name on the account is Pedro Serani, which is just for them to confirm they found the right account
+- Deposit is paid via Zelle: the number to search and send to is 832-334-3416. The name on the account is Pedro Serani, which is just so they can confirm they found the right one
 - Zelle payers get a discount on the remaining balance
 - Full payment can also be done online, but Zelle is preferred and gets a better rate
 
@@ -55,9 +170,9 @@ BOOKING FLOW - follow this order naturally:
 1. Build excitement and answer questions about the course
 2. Once they are interested, find out how many students will attend
 3. ALWAYS ask about any food intolerances or allergies AND milk preference (whole milk, oat, almond, soy, etc.) - do this before confirming
-4. Agree on a preferred date and time (first slot at 10am, last slot at 6pm, Mon-Sun)
-5. Confirm the location - ask them to share their address. They can send a location pin, type their address, or both - whatever is easiest for them
-6. At the end, when everything is set, share the deposit details: send $50 via Zelle. The number to search and send to is *832-334-3416*. Once they find it, the name on the account (Pedro Serani) will confirm they have the right one. Make clear the phone number is what they need
+4. Agree on a preferred date and time - ONLY suggest slots that appear in the AVAILABILITY section below (if provided). If no availability data is shown, ask their preference and say Pedro will confirm
+5. Confirm the location - ask them to share their address. They can send a location pin, type their address, or both
+6. At the end, when everything is set, share the deposit details: send $50 via Zelle to 832-334-3416. The name Pedro Serani on the account is just to confirm they found the right one
 7. Once the deposit is confirmed, send this reminder: "One last thing - please avoid drinking coffee on the day of the class! We are going to be tasting and drinking A LOT of coffee together, so come with a fresh palate. See you soon!"
 
 YOUR CONVERSATION APPROACH:
@@ -77,9 +192,9 @@ STRICT RULES:
 - Never mention you are an AI unless directly asked. If asked, say you are Sofia, the Serani Specialty Coffee team assistant.
 - Be concise. WhatsApp conversations should feel effortless, not like reading an essay.
 - Never share the Zelle number until the very end when the customer is ready to pay the deposit.
-- CRITICAL WhatsApp formatting rule: use single asterisks for bold like *this*, NEVER double asterisks. Using **double asterisks** will show the ** symbols visibly to the customer and look broken. Always single asterisk only.
-- CRITICAL: Never use the em dash character (the long dash). Use a regular hyphen (-) or rewrite the sentence to avoid it entirely.
-- The FIRST time you mention Pedro Serani in a conversation, briefly introduce him as our founder and head instructor. After that, just use his name naturally without repeating his title."""
+- CRITICAL WhatsApp formatting rule: use single asterisks for bold like *this*, NEVER double asterisks. Using **double asterisks** will show the ** symbols visibly to the customer and look broken.
+- CRITICAL: Never use the em dash character (the long dash). Use a regular hyphen (-) or rewrite the sentence instead.
+- The FIRST time you mention Pedro Serani in a conversation, briefly introduce him as our founder and head instructor. After that, just use his name naturally."""
 
 
 @app.route("/webhook", methods=["POST"])
@@ -104,12 +219,24 @@ def webhook():
     if len(conversation_history[sender]) > 20:
         conversation_history[sender] = conversation_history[sender][-20:]
 
+    # Build dynamic system prompt - inject live calendar availability if configured
+    availability = get_weekly_availability()
+    if availability:
+        dynamic_prompt = (
+            SYSTEM_PROMPT
+            + f"\n\n{availability}\n\n"
+            + "IMPORTANT: When discussing scheduling, ONLY suggest time slots listed as available above. "
+            + "If the customer requests a time that is not available, apologize warmly and offer the nearest open alternatives."
+        )
+    else:
+        dynamic_prompt = SYSTEM_PROMPT
+
     try:
         # Call Claude API
         response = anthropic_client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1024,
-            system=SYSTEM_PROMPT,
+            system=dynamic_prompt,
             messages=conversation_history[sender]
         )
 
