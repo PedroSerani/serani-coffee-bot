@@ -205,12 +205,14 @@ def webhook():
         conversation_history[sender] = conversation_history[sender][-20:]
     # Inject live calendar availability into system prompt
     availability = get_weekly_availability()
+    today_str = datetime.datetime.now().strftime("%A, %B %d, %Y")
+    date_note = f"TODAY'S DATE: {today_str}. Always use this year when creating bookings."
     if availability:
-        dynamic_prompt = (SYSTEM_PROMPT + f"\n\n{availability}\n\n"
+        dynamic_prompt = (SYSTEM_PROMPT + f"\n\n{date_note}\n\n{availability}\n\n"
             + "IMPORTANT: When discussing scheduling, ONLY suggest time slots listed as available above. "
             + "If the customer requests a time that is not available, apologize warmly and offer the nearest open alternatives.")
     else:
-        dynamic_prompt = SYSTEM_PROMPT
+        dynamic_prompt = SYSTEM_PROMPT + f"\n\n{date_note}"
     try:
         response = anthropic_client.messages.create(
             model="claude-sonnet-4-6",
