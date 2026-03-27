@@ -89,8 +89,8 @@ def get_weekly_availability():
         lines = ["PEDRO'S AVAILABILITY (Houston time, next 7 days):"]
         for day_offset in range(7):
             target_date = now_utc.date() + datetime.timedelta(days=day_offset)
-            window_start = datetime.datetime(target_date.year, target_date.month, target_date.day, 10 - utc_offset, 0, 0)
-            window_end = datetime.datetime(target_date.year, target_date.month, target_date.day, 22 - utc_offset, 0, 0)
+            window_start = datetime.datetime(target_date.year, target_date.month, target_date.day, 10, 0, 0) - datetime.timedelta(hours=utc_offset)
+            window_end = datetime.datetime(target_date.year, target_date.month, target_date.day, 22, 0, 0) - datetime.timedelta(hours=utc_offset)
             body = {
                 "timeMin": window_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "timeMax": window_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
