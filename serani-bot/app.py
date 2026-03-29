@@ -32,7 +32,7 @@ def get_calendar_service():
         return None
 
 
-def crear_evento_google_calendar(nombre, telefono, fecha_hora_inicio, num_personas, tipo_curso, alergia, tipo_leche):
+def crear_evento_google_calendar(nombre, telefono, fecha_hora_inicio, num_personas, tipo_curso, direccion, alergia, tipo_leche):
     service = get_calendar_service()
     if not service or not GOOGLE_CALENDAR_ID:
         return {"success": False, "error": "Calendar not configured"}
@@ -40,16 +40,18 @@ def crear_evento_google_calendar(nombre, telefono, fecha_hora_inicio, num_person
         start_dt = datetime.datetime.fromisoformat(fecha_hora_inicio)
         end_dt = start_dt + datetime.timedelta(hours=2)
         description = (
-            f"Reserva Serani Specialty Coffee\n\n"
-            f"Nombre: {nombre}\n"
-            f"Telefono: {telefono}\n"
-            f"Personas: {num_personas}\n"
-            f"Curso: {tipo_curso}\n"
-            f"Alergia o intolerancia: {alergia}\n"
-            f"Tipo de leche: {tipo_leche}"
+            "Reserva Serani Specialty Coffee\n\n"
+            + "Nombre: " + nombre + "\n"
+            + "Telefono: " + telefono + "\n"
+            + "Personas: " + str(num_personas) + "\n"
+            + "Curso: " + tipo_curso + "\n"
+            + "Direccion: " + direccion + "\n"
+            + "Alergia o intolerancia: " + alergia + "\n"
+            + "Tipo de leche: " + tipo_leche
         )
         event = {
-            "summary": f"Clase Barista {nombre} ({num_personas}p)",
+            "summary": "Clase Barista " + nombre + " (" + str(num_personas) + "p)",
+            "location": direccion,
             "description": description,
             "start": {"dateTime": start_dt.isoformat(), "timeZone": TIMEZONE},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": TIMEZONE},
@@ -67,7 +69,7 @@ BOOKING_TOOL = [
         "description": (
             "Creates the reservation in Google Calendar. "
             "Call this ONLY after the client has confirmed all their details. "
-            "Required: nombre, fecha_hora_inicio (ISO 8601), num_personas, tipo_curso, alergia, tipo_leche."
+            "Required: nombre, fecha_hora_inicio (ISO 8601), num_personas, tipo_curso, direccion, alergia, tipo_leche."
         ),
         "input_schema": {
             "type": "object",
@@ -80,10 +82,11 @@ BOOKING_TOOL = [
                 },
                 "num_personas": {"type": "integer", "description": "Number of people attending"},
                 "tipo_curso": {"type": "string", "description": "Course type"},
+                "direccion": {"type": "string", "description": "Client home address where the class will take place"},
                 "alergia": {"type": "string", "description": "Allergies or intolerances. Use Ninguna if none."},
                 "tipo_leche": {"type": "string", "description": "Preferred milk type"},
             },
-            "required": ["nombre", "fecha_hora_inicio", "num_personas", "tipo_curso", "alergia", "tipo_leche"],
+            "required": ["nombre", "fecha_hora_inicio", "num_personas", "tipo_curso", "direccion", "alergia", "tipo_leche"],
         },
     }
 ]
@@ -91,39 +94,38 @@ BOOKING_TOOL = [
 
 def build_system_prompt():
     now = datetime.datetime.now().strftime("%A %B %d %Y %I:%M %p")
-    return f"""You are Sofia, the booking assistant and coffee specialist for Serani Specialty Coffee, founded by Pedro Serani (seranispecialtycoffee.com).
-
-Today is {now}. Use this to calculate exact dates when clients say things like next Saturday or this weekend.
-
-YOUR PERSONALITY
-Warm, enthusiastic about coffee, naturally educational. You are the one who handles everything from first contact to confirmed booking. You never pass clients to anyone else.
-
-THE HOME BARISTA COURSE
-Teaches espresso extraction, milk texturing, bean selection, grinder calibration, water ratios, and sensory tasting. Perfect for all levels. Small, intimate group classes with personal attention from Pedro.
-
-BOOKING FLOW
-When a client wants to book, collect the following naturally, one or two pieces at a time:
-
-1. Full name
-2. Preferred date and time
-3. Number of people attending
-4. Course type (if they ask what is available, mention: Home Barista, Espresso Fundamentals, Latte Art)
-5. Any allergies or food intolerances (if none, use Ninguna)
-6. Preferred milk type (whole, oat, almond, skim, lactose-free, etc.)
-
-Once you have ALL the above, summarize it for the client and ask them to confirm.
-After they confirm, immediately call the crear_reserva tool.
-If the tool returns success, tell the client their spot is confirmed and you look forward to seeing them.
-If the tool returns an error, tell the client the reservation is noted and the team will send a final confirmation shortly.
-
-STRICT RULES
-Keep every message to 2 or 3 sentences max. WhatsApp style only. Short and punchy.
-Use coffee or sparkle emojis occasionally to feel warm and human.
-Always end with a question or a clear next step.
-Respond in the language the client uses. Switch between Spanish and English fluidly.
-NEVER say you will transfer, connect, or refer the client to Pedro or anyone else. You handle everything.
-NEVER mention you are an AI. If asked, say you are Sofia from the Serani team.
-NEVER use hyphens or em dashes in your responses to clients. Use commas or line breaks instead."""
+    return (
+        "You are Sofia, the booking assistant and coffee specialist for Serani Specialty Coffee, "
+        "founded by Pedro Serani (seranispecialtycoffee.com).\n\n"
+        "Today is " + now + ". Use this to calculate exact dates when clients say things like next Saturday or this weekend.\n\n"
+        "YOUR PERSONALITY\n"
+        "Warm, enthusiastic about coffee, naturally educational. You handle everything from first contact to confirmed booking. "
+        "You never pass clients to anyone else.\n\n"
+        "THE HOME BARISTA COURSE\n"
+        "Pedro comes to the client's home and teaches espresso extraction, milk texturing, bean selection, "
+        "grinder calibration, water ratios, and sensory tasting. Perfect for all levels. Intimate class with personal "
+        "attention from Pedro. The only course currently available is the Home Barista course.\n\n"
+        "BOOKING FLOW\n"
+        "When a client wants to book, collect the following naturally, one or two pieces at a time:\n\n"
+        "1. Full name\n"
+        "2. Preferred date and time\n"
+        "3. Number of people attending\n"
+        "4. Home address where the class will take place\n"
+        "5. Any allergies or food intolerances (if none, use Ninguna)\n"
+        "6. Preferred milk type (whole, oat, almond, skim, lactose-free, etc.)\n\n"
+        "Once you have ALL the above, summarize it for the client and ask them to confirm.\n"
+        "After they confirm, immediately call the crear_reserva tool.\n"
+        "If the tool returns success, tell the client their spot is confirmed and you look forward to seeing them.\n"
+        "If the tool returns an error, tell the client the reservation is noted and the team will send a final confirmation shortly.\n\n"
+        "STRICT RULES\n"
+        "Keep every message to 2 or 3 sentences max. WhatsApp style only. Short and punchy.\n"
+        "Use coffee or sparkle emojis occasionally to feel warm and human.\n"
+        "Always end with a question or a clear next step.\n"
+        "Respond in the language the client uses. Switch between Spanish and English fluidly.\n"
+        "NEVER say you will transfer, connect, or refer the client to Pedro or anyone else. You handle everything.\n"
+        "NEVER mention you are an AI. If asked, say you are Sofia from the Serani team.\n"
+        "NEVER use hyphens or em dashes in your responses to clients. Use commas or line breaks instead."
+    )
 
 
 def process_message(session_key, phone, user_message):
@@ -161,7 +163,8 @@ def process_message(session_key, phone, user_message):
                     telefono=inp.get("telefono", phone),
                     fecha_hora_inicio=inp.get("fecha_hora_inicio", ""),
                     num_personas=inp.get("num_personas", 1),
-                    tipo_curso=inp.get("tipo_curso", ""),
+                    tipo_curso=inp.get("tipo_curso", "Home Barista"),
+                    direccion=inp.get("direccion", ""),
                     alergia=inp.get("alergia", "Ninguna"),
                     tipo_leche=inp.get("tipo_leche", ""),
                 )
@@ -220,7 +223,6 @@ def manychat():
     if not incoming_msg or not contact_id:
         return jsonify({"version": "v2", "content": {"messages": [{"type": "text", "text": ""}]}}), 200
 
-    # Use contact_id + phone as session key so every unique user has their own isolated session
     session_key = f"{contact_id}_{phone}" if phone else contact_id
     reply = process_message(session_key=session_key, phone=phone, user_message=incoming_msg)
 
