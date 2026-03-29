@@ -4,8 +4,6 @@ import anthropic
 import os
 import json
 import datetime
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
 
 app = Flask(__name__)
 
@@ -21,6 +19,8 @@ def get_calendar_service():
     if not GOOGLE_CREDENTIALS_JSON:
         return None
     try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
         creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
         credentials = service_account.Credentials.from_service_account_info(
             creds_dict,
@@ -220,7 +220,9 @@ def manychat():
     if not incoming_msg or not contact_id:
         return jsonify({"version": "v2", "content": {"messages": [{"type": "text", "text": ""}]}}), 200
 
-    reply = process_message(session_key=contact_id, phone=phone, user_message=incoming_msg)
+    # Use contact_id + phone as session key so every unique user has their own isolated session
+    session_key = f"{contact_id}_{phone}" if phone else contact_id
+    reply = process_message(session_key=session_key, phone=phone, user_message=incoming_msg)
 
     return jsonify({
         "version": "v2",
@@ -232,7 +234,7 @@ def manychat():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return "Serani Specialty Coffee Bot Sofia is online! ☕", 200
+    return "Serani Specialty Coffee Bot Sofia is online!", 200
 
 
 if __name__ == "__main__":
