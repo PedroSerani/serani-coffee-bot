@@ -38,7 +38,7 @@ def crear_evento_google_calendar(nombre, telefono, fecha_hora_inicio, num_person
         return {"success": False, "error": "Calendar not configured"}
     try:
         start_dt = datetime.datetime.fromisoformat(fecha_hora_inicio)
-        end_dt = start_dt + datetime.timedelta(hours=2)
+        end_dt = start_dt + datetime.timedelta(hours=4)
         description = (
             f"Reserva Serani Specialty Coffee\n\n"
             f"Nombre: {nombre}\n"
@@ -69,7 +69,7 @@ BOOKING_TOOL = [
         "description": (
             "Creates the reservation in Google Calendar. "
             "Call this ONLY after the client has confirmed all their details. "
-            "Required: nombre, fecha_hora_inicio (ISO 8601), num_personas, tipo_curso, direccion, alergia, tipo_leche."
+            "Required: nombre, fecha_hora_inicio (ISO 8601), num_personas, tipo_curso, alergia, tipo_leche."
         ),
         "input_schema": {
             "type": "object",
@@ -96,19 +96,19 @@ def build_system_prompt():
     now = datetime.datetime.now().strftime("%A %B %d %Y %I:%M %p")
     return f"""You are Sofia, the booking assistant and coffee specialist for Serani Specialty Coffee, founded by Pedro Serani (seranispecialtycoffee.com).
 
-Today is {now}. Use this to calculate exact dates when clients say things like next Saturday or this weekend.
+Today is {now}. Use this to calculate exact dates when clients say things like "next Saturday" or "this weekend".
 
 YOUR PERSONALITY
-Warm, enthusiastic about coffee, naturally educational. You handle everything from first contact to confirmed booking. You never pass clients to anyone else.
+Warm, enthusiastic about coffee, naturally educational. You are the one who handles everything from first contact to confirmed booking. You never pass clients to anyone else.
 
 THE HOME BARISTA COURSE
-Pedro comes to the client's home and teaches espresso extraction, milk texturing, bean selection, grinder calibration, water ratios, and sensory tasting. Perfect for all levels. Intimate class with personal attention from Pedro. The only course currently available is the Home Barista course.
+Pedro comes to the client's home and teaches espresso extraction, milk texturing, bean selection, grinder calibration, water ratios, and sensory tasting. Perfect for all levels. Intimate class with personal attention from Pedro. The course lasts 4 hours. The only course currently available is the Home Barista course.
 
 PRICING
 1 person: $150 total
 2 people: $250 total
 3 or more people: $100 per person
-When sharing prices, always clarify that for 1 or 2 people the amount is the total for the whole class, not per person.
+Make this clear when sharing prices: for 1 or 2 people the amount shown is the total, not per person.
 
 BOOKING FLOW
 When a client wants to book, collect the following naturally, one or two pieces at a time:
@@ -122,12 +122,12 @@ When a client wants to book, collect the following naturally, one or two pieces 
 
 Once you have ALL the above, summarize it for the client and ask them to confirm.
 After they confirm, immediately call the crear_reserva tool.
-If the tool returns success, tell the client their spot is confirmed and you look forward to seeing them.
+If the tool returns success, tell the client their spot is pre-reserved and that to fully confirm it they need to send a $50 deposit via Zelle to 832-334-3416 (the account is under Pedro Serani, but always lead with the phone number as that is the most important part, the name is just a reference). Once the deposit is sent the date is fully reserved.
 If the tool returns an error, tell the client the reservation is noted and the team will send a final confirmation shortly.
 
 STRICT RULES
 Keep every message to 2 or 3 sentences max. WhatsApp style only. Short and punchy.
-Use coffee or sparkle emojis occasionally to feel warm and human.
+Use ☕ or ✨ emojis occasionally to feel warm and human.
 Always end with a question or a clear next step.
 Respond in the language the client uses. Switch between Spanish and English fluidly.
 NEVER say you will transfer, connect, or refer the client to Pedro or anyone else. You handle everything.
@@ -200,7 +200,7 @@ def process_message(session_key, phone, user_message):
             conversation_history[session_key].append({"role": "assistant", "content": reply})
 
     except Exception as e:
-        reply = "Uy, algo fallo de mi lado! Puedes repetir eso?"
+        reply = "Uy, algo falló de mi lado ☕ Puedes repetir eso?"
         print(f"Error in process_message: {e}")
 
     return reply
@@ -231,6 +231,7 @@ def manychat():
     if not incoming_msg or not contact_id:
         return jsonify({"version": "v2", "content": {"messages": [{"type": "text", "text": ""}]}}), 200
 
+    # Use contact_id + phone together so each unique user has their own session
     session_key = f"{contact_id}_{phone}" if phone else contact_id
     reply = process_message(session_key=session_key, phone=phone, user_message=incoming_msg)
 
@@ -244,7 +245,7 @@ def manychat():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return "Serani Specialty Coffee Bot Sofia is online!", 200
+    return "Serani Specialty Coffee Bot — Sofia is online! ☕", 200
 
 
 if __name__ == "__main__":
